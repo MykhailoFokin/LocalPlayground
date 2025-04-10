@@ -146,15 +146,26 @@ To stop or start specific profiles without removing them, use `docker-compose st
 
 ## 🗃️ Folder Structure
 
+The repository structure is organized to keep different components of the local development environment logically separated:
+
 ```plaintext
 LocalPlayground/
-├── docker-compose.yml        # Docker Compose configuration
-├── .env                      # Environment variables
-├── configs/                  # Configuration files for services
-│   ├── trino/                # Trino catalog configs
-│   ├── superset/             # Superset bootstrap config
-│   └── spark/                # Spark Thrift config
+├── dags/
+│   ├── Hive_Postgres_Iceberg.py
+│   └── rabbitmq_sender.py
+├── plugins/
+│   └── ... (Custom Airflow plugins, if any)
+├── templates/
+│   └── dag_report_email.html
+├── utils/
+│   ├── email/
+│   │   └── CustomEmailOperator.py
+│   └── rabbitmq/
+│       └── source.py
+├── docker-compose.yml
+├── .dockerignore
 └── README.md
+```
 
 ## 📌 Notes
 
