@@ -1,0 +1,43 @@
+<html>
+   <head>
+       <meta charset="utf-8">
+       <style>
+           .main { text-align: center; margin: 0 10%; width: 80%; }
+           .header { padding: 0.5em 0; }
+           .content { background-color: #FFF; border-radius: 10px; color: #333; padding: 1em 1em; text-align: left; }
+           .footer { padding: 1em; }
+
+           body.color-default {
+               background-color: #3e72b6; 
+               color: #FFF;
+               font-family: Helvetica, Arial, sans-serif;
+           }
+           body.color-error {
+               background-color: #FF0000; 
+               color: #FFF;
+               font-family: Helvetica, Arial, sans-serif;
+           }
+           body.color-success {
+               background-color: #008000; 
+               color: #FFF;
+               font-family: Helvetica, Arial, sans-serif;
+           }
+       </style>
+       {% block head %}
+       {% endblock %}
+   </head>
+   <body class="{% if params.style.main_color == 'error' %}color-error{% elif params.style.main_color == 'success' %}color-success{% else %}color-default{% endif %}">
+       <div class="main">
+           <div class="header">
+               <h1>Report for {{ dag.dag_id }}</h1>
+           </div>
+           <div class="content">
+               {% block content %}
+               {% endblock %}
+           </div>
+           <div class="footer">
+               {{ params.footer | default('This is an automated message, please do not reply.') }}
+           </div>
+       </div>
+   </body>
+</html>

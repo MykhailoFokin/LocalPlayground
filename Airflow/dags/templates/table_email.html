@@ -1,0 +1,31 @@
+{% extends 'base.html' %}
+
+{% block head %}
+   <style>
+       .content table { border: 1px solid #bbb; border-radius: 5px; border-spacing: 0; line-height: 2em; width: 100%;  }
+       .content td, .content th { padding: 0.3em; }
+       .content td { border-top: 1px solid #e6e6e6; }
+       .right-border { border-right: 1px solid #e6e6e6; }
+       .odd { background-color: #f4f4f4; }
+   </style>       
+{% endblock %}
+
+{% block content %}
+   <p>
+       {{ params.content.paragraph }}
+   </p>
+   <table>
+       <tr>
+           <th class="right-border">Target Object</th>
+           <th class="right-border">Command</th>
+           <th>Result</th>
+       </tr>
+       {% for message in params.content.messages %}
+       <tr class="{{ loop.cycle('odd', 'even') }}">
+           <td class="right-border">{{ message.target }}</td>
+           <td class="right-border">{{ message.command }}</td>
+           <td>{{ message.result }}</td>
+       </tr>
+       {% endfor %}
+   </table>
+{% endblock %}

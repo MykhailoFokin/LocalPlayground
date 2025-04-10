@@ -1,0 +1,448 @@
+version: '3.8'
+
+networks:
+  my_network:
+    driver: bridge
+
+services:
+
+  driver-downloader:
+    image: alpine:latest
+    container_name: driver-downloader
+    volumes:
+      - ./dependencies:/dependencies
+    command: sh -c '
+        apk add --no-cache wget &&
+        wget -nc -P /dependencies https://repo1.maven.org/maven2/org/postgresql/postgresql/42.7.5/postgresql-42.7.5.jar;
+      '
+
+  postgres:
+    build: ./postgresql
+    ports:
+      - "${POSTGRES_PORT}:${POSTGRES_PORT}"
+    environment:
+      POSTGRES_USER: ${POSTGRES_ADMIN_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_ADMIN_PASSWORD}
+      POSTGRES_DB: default
+    volumes:
+      - ./postgresql/docker-entrypoint-initdb.d:/docker-entrypoint-initdb.d
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - my_network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_ADMIN_USER} -d ${POSTGRES_ADMIN_PASSWORD}"]
+      interval: 5s
+      retries: 5
+      start_period: 20s
+      timeout: 5s
+
+  redis:
+    image: redis:7.4.2
+    ports:
+      - "6379:6379"
+    networks:
+      - my_network
+    volumes:
+      - redis_data:/data
+
+  airflow-init:
+    build: 
+      context: ./airflow
+      dockerfile: Dockerfile
+      args:
+        AIRFLOW_VERSION: 2.10.5  # Replace with desired Airflow version
+        CONSTRAINTS_URL: https://raw.githubusercontent.com/apache/airflow/constraints-2.10.5/constraints-3.9.txt # Replace with the appropriate constraints file for your version of Python
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    networks:
+      - my_network
+    environment:
+      AIRFLOW__CORE__EXECUTOR: CeleryExecutor
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${POSTGRES_AIRFLOW_USER}:${POSTGRES_AIRFLOW_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT}/${POSTGRES_AIRFLOW_DB}
+    entrypoint: >
+      /bin/bash -c "
+      airflow db migrate &&
+      airflow users create --username admin --password admin --firstname Admin --lastname User --role Admin --email admin@example.com &&
+      airflow connections add postgres_trino_db \
+      --conn-type postgres \
+      --conn-host ${POSTGRES_HOST} \
+      --conn-login ${POSTGRES_TRINO_USER} \
+      --conn-password ${POSTGRES_TRINO_PASSWORD} \
+      --conn-port ${POSTGRES_PORT} \
+      --conn-schema ${POSTGRES_TRINO_DATABASE}
+      "
+  airflow-webserver:
+    build: 
+      context: ./airflow
+      dockerfile: Dockerfile
+      args:
+        AIRFLOW_VERSION: 2.10.5  # Replace with desired Airflow version
+        CONSTRAINTS_URL: https://raw.githubusercontent.com/apache/airflow/constraints-2.10.5/constraints-3.9.txt # Replace with the appropriate constraints file for your version of Python
+    #restart: always
+    depends_on:
+      postgres:
+        condition: service_healthy
+        restart: true
+      redis:
+        condition: service_started
+      airflow-scheduler:
+        condition: service_started
+    ports:
+      - "8080:8080"
+    environment:
+      AIRFLOW_HOME: /opt/airflow
+      AIRFLOW__CORE__EXECUTOR: CeleryExecutor
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${POSTGRES_AIRFLOW_USER}:${POSTGRES_AIRFLOW_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT}/${POSTGRES_AIRFLOW_DB}
+      #AIRFLOW__CORE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${POSTGRES_AIRFLOW_USER}:${POSTGRES_AIRFLOW_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT}/${POSTGRES_AIRFLOW_DB} # Outdated, but may be available in some configurations
+      AIRFLOW__CELERY__BROKER_URL: redis://redis:6379/0
+      AIRFLOW__CELERY__RESULT_BACKEND: db+postgresql+psycopg2://${POSTGRES_AIRFLOW_USER}:${POSTGRES_AIRFLOW_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT}/${POSTGRES_AIRFLOW_DB}
+      AIRFLOW__CORE__FERNET_KEY: thisisaverysecretkey
+      AIRFLOW__WEBSERVER__SERCRET_KEY: supersercretkey
+      AIRFLOW__CORE__DAGS_FOLDER: /opt/airflow/dags
+      AIRFLOW__CORE__PLUGINS_FOLDER: /opt/airflow/plugins
+      #AIRFLOW__LOGGING__LOGGING_LEVEL: DEBUG
+      # Configuration SMTP for MailHog
+      AIRFLOW__SMTP__SMTP_HOST: ${EMAIL_SMTP_MAILHOG_HOST}
+      AIRFLOW__SMTP__SMTP_PORT: ${EMAIL_SMTP_MAILHOG_PORT}
+      AIRFLOW__SMTP__SMTP_MAIL_FROM: ${EMAIL_SMTP_EMAIL_FROM}  # Replace with your desired sender address
+      AIRFLOW__SMTP__SMTP_SSL: "False"
+      AIRFLOW__SMTP__SMTP_STARTTLS: "False"
+      # Optionally, if MailHog requires authentication (default is no):
+      # AIRFLOW__SMTP__SMTP_USER: ""
+      # AIRFLOW__SMTP__SMTP_PASSWORD: ""
+      # AIRFLOW__SMTP__SMTP_STARTTLS: "False" # Usually not needed for MailHog
+      AIRFLOW__WEBSERVER__ALLOW_RAW_HTML_DESCRIPTIONS: "True"
+    env_file:
+      - ./Airflow/.airflow_env
+    volumes:
+      - ./Airflow/dags:/opt/airflow/dags
+      - ./Airflow/plugins:/opt/airflow/plugins
+      - airflow_logs:/opt/airflow/logs
+    #cpus: "1.5"  # Limits container to 1.5 CPUs
+    entrypoint: /entrypoint.sh webserver
+    networks:
+      - my_network
+    healthcheck:
+      test: ["CMD-SHELL", "airflow webserver health"]
+      interval: 5s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
+
+  airflow-scheduler:
+    build:
+      context: ./airflow
+      dockerfile: Dockerfile
+      args:
+        AIRFLOW_VERSION: 2.10.5  # Replace with desired Airflow version
+        CONSTRAINTS_URL: https://raw.githubusercontent.com/apache/airflow/constraints-2.10.5/constraints-3.9.txt # Replace with the appropriate constraints file for your version of Python
+    depends_on:
+      postgres:
+        condition: service_healthy
+        restart: true
+      redis:
+        condition: service_started
+      airflow-init:
+        condition: service_started
+    environment:
+      AIRFLOW_HOME: /opt/airflow
+      AIRFLOW__CORE__EXECUTOR: CeleryExecutor
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${POSTGRES_AIRFLOW_USER}:${POSTGRES_AIRFLOW_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT}/${POSTGRES_AIRFLOW_DB}
+      #AIRFLOW__CORE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${POSTGRES_AIRFLOW_USER}:${POSTGRES_AIRFLOW_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT}/${POSTGRES_AIRFLOW_DB} # Outdated, but may be available in some configurations
+      AIRFLOW__CELERY__BROKER_URL: redis://redis:6379/0
+      AIRFLOW__CORE__DAGS_FOLDER: /opt/airflow/dags
+      AIRFLOW__CORE__PLUGINS_FOLDER: /opt/airflow/plugins
+      # Configuration SMTP for MailHog
+      AIRFLOW__SMTP__SMTP_HOST: ${EMAIL_SMTP_MAILHOG_HOST}
+      AIRFLOW__SMTP__SMTP_PORT: ${EMAIL_SMTP_MAILHOG_PORT}
+      AIRFLOW__SMTP__SMTP_MAIL_FROM: ${EMAIL_SMTP_EMAIL_FROM}  # Replace with your desired sender address
+      AIRFLOW__SMTP__SMTP_SSL: "False"
+      AIRFLOW__SMTP__SMTP_STARTTLS: "False"
+      # Optionally, if MailHog requires authentication (default is no):
+      # AIRFLOW__SMTP__SMTP_USER: ""
+      # AIRFLOW__SMTP__SMTP_PASSWORD: ""
+      # AIRFLOW__SMTP__SMTP_STARTTLS: "False" # Usually not needed for MailHog
+      AIRFLOW__WEBSERVER__ALLOW_RAW_HTML_DESCRIPTIONS: "True"
+    env_file:
+      - ./Airflow/.airflow_env
+    volumes:
+      - ./Airflow/dags:/opt/airflow/dags
+      - ./Airflow/plugins:/opt/airflow/plugins
+      - airflow_logs:/opt/airflow/logs
+    entrypoint: /entrypoint.sh scheduler
+    networks:
+      - my_network
+    healthcheck:
+      test: ["CMD-SHELL", "airflow scheduler health"]
+      interval: 5s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
+
+  airflow-worker:
+    build:
+      context: ./airflow
+      dockerfile: Dockerfile
+      args:
+        AIRFLOW_VERSION: 2.10.5  # Replace with desired Airflow version
+        CONSTRAINTS_URL: https://raw.githubusercontent.com/apache/airflow/constraints-2.10.5/constraints-3.9.txt # Replace with the appropriate constraints file for your version of Python
+    depends_on:
+      postgres:
+        condition: service_healthy
+        restart: true
+      redis:
+        condition: service_started
+      airflow-scheduler:
+        condition: service_started
+    environment:
+      AIRFLOW_HOME: /opt/airflow
+      AIRFLOW__CORE__EXECUTOR: CeleryExecutor
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${POSTGRES_AIRFLOW_USER}:${POSTGRES_AIRFLOW_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT}/${POSTGRES_AIRFLOW_DB}
+      #AIRFLOW__CORE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${POSTGRES_AIRFLOW_USER}:${POSTGRES_AIRFLOW_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT}/${POSTGRES_AIRFLOW_DB} # Outdated, but may be available in some configurations
+      AIRFLOW__CELERY__BROKER_URL: redis://redis:6379/0
+      AIRFLOW__CORE__DAGS_FOLDER: /opt/airflow/dags
+      AIRFLOW__CORE__PLUGINS_FOLDER: /opt/airflow/plugins
+      # Configuration SMTP for MailHog
+      AIRFLOW__SMTP__SMTP_HOST: ${EMAIL_SMTP_MAILHOG_HOST}
+      AIRFLOW__SMTP__SMTP_PORT: ${EMAIL_SMTP_MAILHOG_PORT}
+      AIRFLOW__SMTP__SMTP_MAIL_FROM: ${EMAIL_SMTP_EMAIL_FROM}  # Replace with your desired sender address
+      AIRFLOW__SMTP__SMTP_SSL: "False"
+      AIRFLOW__SMTP__SMTP_STARTTLS: "False"
+      # Optionally, if MailHog requires authentication (default is no):
+      # AIRFLOW__SMTP__SMTP_USER: ""
+      # AIRFLOW__SMTP__SMTP_PASSWORD: ""
+      AIRFLOW__WEBSERVER__ALLOW_RAW_HTML_DESCRIPTIONS: "True"
+      # Postgres configuration for user data
+      POSTGRES_HOST: postgres # service name of postgres
+      POSTGRES_PORT: ${POSTGRES_PORT:-${POSTGRES_PORT}}
+      POSTGRES_DB: ${POSTGRES_USER_DATABASE}
+      POSTGRES_USER: ${POSTGRES_ADMIN_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_ADMIN_PASSWORD}
+      # Trino
+      TRINO_HOST: host.docker.internal
+      TRINO_PORT: 8082
+      TRINO_USER: admin
+      TRINO_PASSWORD: password
+      # RabbitMQ
+      RABBITMQ_PASSWORD: ${RABBITMQ_ADMIN_PASSWORD}
+      POSTGRES_RABBITMQ_TABLE: ${POSTGRES_RABBITMQ_TABLE}
+    env_file:
+      - ./Airflow/.airflow_env
+    volumes:
+      - ./Airflow/dags:/opt/airflow/dags
+      - ./Airflow/plugins:/opt/airflow/plugins
+      - airflow_logs:/opt/airflow/logs
+    entrypoint: /entrypoint.sh worker
+    networks:
+      - my_network
+    healthcheck:
+      test: ["CMD-SHELL", "airflow worker health"]
+      interval: 5s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
+
+  mailhog:
+    build: ./mailhog
+    ports:
+      - "1025:1025"
+      - "8025:8025"
+    networks:
+      - my_network
+
+  rabbitmq:
+    build: ./rabbitmq
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    networks:
+      - my_network
+    environment:
+      #- RABBITMQ_DEFAULT_USER=admin
+      #- RABBITMQ_DEFAULT_PASS=password
+      - RABBITMQ_SERVER_ADDITIONAL_ERL_ARGS=-rabbitmq_management load_definitions "/etc/rabbitmq/definitions.json"
+    profiles:
+      - rabbitmq
+
+  minio:
+    image: minio/minio:RELEASE.2023-12-02T10-51-33Z.hotfix.d45db9b16 # or latest
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    environment:
+      - MINIO_ROOT_USER=${MINIO_USER}
+      - MINIO_ROOT_PASSWORD=${MINIO_PASSWORD}
+      - MINIO_DOMAIN=minio
+    volumes:
+      - ./minio/data:/data # Mount local folder for MinIO persistence
+      #- minio_data:/data # Named volume usage (docker volume)
+    networks:
+      - my_network
+    command: ["server", "/data", "--console-address", ":9001"]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 5s
+      timeout: 5s
+      retries: 3
+    profiles:
+      - trino_party
+
+  # Additional minio client service to interact with Minio and other s3-compatible services
+  mc:
+    depends_on:
+      - minio
+    image: minio/mc
+    container_name: mc
+    networks:
+      - my_network
+    environment:
+      - AWS_ACCESS_KEY_ID=${MINIO_USER}
+      - AWS_SECRET_ACCESS_KEY=${MINIO_PASSWORD}
+      - AWS_REGION=${MINIO_AWS_REGION}
+    volumes:
+      - ./hive:/host_hive
+    entrypoint: >
+      /bin/sh -c "
+      until (/usr/bin/mc config host add minio http://minio:9000 ${MINIO_USER} ${MINIO_PASSWORD}) do echo '...waiting...' && sleep 1; done;
+      /usr/bin/mc mb minio/${MINIO_WAREHOUSE_BUCKET};
+      /usr/bin/mc mb minio/${MINIO_HIVE_BUCKET}; 
+      /usr/bin/mc policy set public minio/${MINIO_WAREHOUSE_BUCKET};
+      /usr/bin/mc policy set public minio/${MINIO_HIVE_BUCKET};
+      /usr/bin/mc cp /host_hive/example.csv minio/${MINIO_HIVE_BUCKET}/hive_schema/example_data/example_data.csv;
+      "
+    #following can added as last command to keep service alive forever
+    #tail -f /dev/null
+    restart: "no" # OR "on-failure"
+    profiles:
+      - trino_party
+
+  # Use following to build custom image using sqlite3 as catalog db
+  #iceberg-rest:
+  #  build: ./rest
+  #  container_name: iceberg-rest
+  #  networks:
+  #    - my_network
+  #  ports:
+  #    - 8181:8181
+  #  environment:
+  #    - AWS_ACCESS_KEY_ID=${MINIO_USER}
+  #    - AWS_SECRET_ACCESS_KEY=${MINIO_PASSWORD}
+  #    - AWS_REGION=${MINIO_AWS_REGION}
+  #    - CATALOG_WAREHOUSE=s3://${MINIO_WAREHOUSE_BUCKET}/
+  #    - CATALOG_IO__IMPL=org.apache.iceberg.aws.s3.S3FileIO
+  #   - CATALOG_S3_ENDPOINT=http://minio:9000
+  #    - REST_CATALOG_SERVICE_PORT=8181
+  #    - REST_CATALOG_SERVICE_HOST=iceberg-rest
+  #    - CATALOG_JDBC_USER=user
+  #    - CATALOG_JDBC_PASSWORD=password
+  #    - CATALOG_URI=jdbc:sqlite:/data/iceberg_rest.db
+  #  volumes:
+  #    - ./rest/sqlite_data:/data
+  #  profiles:
+  #    - trino_party
+
+  # Use this one to re-use existing postgres
+  iceberg-rest:
+    image: tabulario/iceberg-rest:1.6.0
+    networks:
+      - my_network
+    ports:
+      - 8181:8181
+    environment:
+      - AWS_ACCESS_KEY_ID=${MINIO_USER}
+      - AWS_SECRET_ACCESS_KEY=${MINIO_PASSWORD}
+      - AWS_REGION=${MINIO_AWS_REGION}
+      - CATALOG_WAREHOUSE=s3://${MINIO_WAREHOUSE_BUCKET}/
+      - CATALOG_IO__IMPL=org.apache.iceberg.aws.s3.S3FileIO
+      - CATALOG_S3_ENDPOINT=http://minio:9000
+      - REST_CATALOG_SERVICE_PORT=8181
+      - REST_CATALOG_SERVICE_HOST=iceberg-rest
+      - CATALOG_URI=jdbc:postgresql://postgres:${POSTGRES_PORT}/iceberg_rest_db
+      - CATALOG_JDBC_USER=iceberg_rest_user
+      - CATALOG_JDBC_PASSWORD=iceberg_rest_password
+      - CATALOG_S3_PATH__STYLE__ACCESS=true
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8181/v1/namespaces"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 5s
+    profiles:
+      - trino_party
+
+  hive-metastore:
+    build:
+      context: ./hive
+      dockerfile: Dockerfile
+    command: ["/opt/hive/bin/hive", "--service", "metastore"]
+    ports:
+      - "9083:9083"
+    environment:
+      HIVE_CONF_fs_s3a_endpoint: http://minio:9000
+      HIVE_CONF_fs_s3a_access_key: ${MINIO_USER}
+      HIVE_CONF_fs_s3a_secret_key: ${MINIO_PASSWORD}
+      HIVE_CONF_fs_s3a_impl: org.apache.hadoop.fs.s3a.S3AFileSystem
+      HIVE_CONF_fs_s3a_path_style_access: "true"
+      HIVE_CONF_fs_s3a_connection_ssl_enabled: "false"
+      HIVE_CONF_hive_metastore_warehouse_dir: s3a://${MINIO_HIVE_BUCKET}/
+      HIVE_CONF_javax_jdo_option_ConnectionURL: jdbc:postgresql://postgres:5432/${POSTGRES_HIVE_DB}
+      HIVE_CONF_javax_jdo_option_ConnectionUserName: ${POSTGRES_HIVE_USER}
+      HIVE_CONF_javax_jdo_option_ConnectionPassword: ${POSTGRES_HIVE_PASSWORD}
+      HIVE_CONF_javax_jdo_option_ConnectionDriverName: org.postgresql.Driver
+      HIVE_POSTGRES_HOST: ${POSTGRES_HOST}
+      HIVE_POSTGRES_PORT: ${POSTGRES_PORT}
+      HIVE_POSTGRES_DB: ${POSTGRES_HIVE_DB}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      driver-downloader:
+        condition: service_completed_successfully
+    networks:
+      - my_network
+    volumes:
+      - ./hive/init_metastore.sh:/opt/hive/bin/init_metastore.sh
+      - ./dependencies/postgresql-42.7.5.jar:/opt/hive/lib/postgres.jar
+      - ./hive/config:/opt/hive/conf
+    entrypoint: ["/opt/hive/bin/init_metastore.sh"]
+    profiles:
+      - trino_party
+
+  trino:
+    image: trinodb/trino:474
+    container_name: trino
+    networks:
+      - my_network
+    ports:
+      - 8082:8080 # Trino Web UI
+    volumes:
+      - ./trino/catalog/iceberg.properties:/etc/trino/catalog/iceberg.properties
+      - ./trino/catalog/hive.properties:/etc/trino/catalog/hive.properties
+      - ./trino/catalog/postgresql.properties:/etc/trino/catalog/postgresql.properties
+    depends_on:
+      - iceberg-rest
+      - minio
+      - hive-metastore
+      - postgres
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8082/v1/statement"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 5s
+    profiles:
+      - trino_party
+
+
+volumes:
+  postgres_data:
+  airflow_logs:
+  redis_data:
+  #minio_data: # named volume declaration

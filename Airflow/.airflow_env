@@ -1,0 +1,6 @@
+# Trino db postgres connection (used for overall data interaction)
+POSTGRES_HOST=postgres
+POSTGRES_PORT=5432
+POSTGRES_TRINO_USER=trino_user
+POSTGRES_TRINO_PASSWORD=trino_password
+POSTGRES_TRINO_DATABASE=trino_db

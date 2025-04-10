@@ -1,0 +1,72 @@
+{
+    "vhosts": [
+      {
+        "name": "/",
+        "tracing": false
+      }
+    ],
+    "queues": [
+      {
+        "name": "info_test_queue",
+        "vhost": "/",
+        "durable": true,
+        "auto_delete": false,
+        "arguments": {}
+      },      
+      {
+        "name": "data_test_queue",
+        "vhost": "/",
+        "durable": true,
+        "auto_delete": false,
+        "arguments": {}
+      }
+    ],
+    "exchanges": [
+      {
+        "name": "topic_logs_exchange",
+        "vhost": "/",
+        "type": "topic",
+        "durable": true,
+        "auto_delete": false,
+        "internal": false,
+        "arguments": {}
+      }
+    ],
+    "bindings": [
+      {
+        "source": "topic_logs_exchange",
+        "vhost": "/",
+        "destination": "info_test_queue",
+        "destination_type": "queue",
+        "routing_key": "*.info",
+        "arguments": {}
+      },
+      {
+        "source": "topic_logs_exchange",
+        "vhost": "/",
+        "destination": "data_test_queue",
+        "destination_type": "queue",
+        "routing_key": "*.data",
+        "arguments": {}
+      }
+    ],
+    "users": [
+      {
+        "name": "admin",
+        "password_hash": "Vpv5zjWb6D9YECKx0fbFpPWl5NbkGRxF+NIhqyOR7qa5FkCm",
+        "hashing_algorithm": "rabbit_password_hashing_sha256",
+        "tags": [
+          "administrator"
+        ]
+      }
+    ],
+    "permissions": [
+      {
+        "user": "admin",
+        "vhost": "/",
+        "configure": ".*",
+        "write": ".*",
+        "read": ".*"
+      }
+    ]
+  }
